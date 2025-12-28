@@ -4,27 +4,18 @@ import numpy as np
 import yfinance as yf
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+import re
 
 # --- 設定 ---
-st.set_page_config(page_title="Pro株分析AI Ver.2.3", page_icon="📊", layout="wide")
+st.set_page_config(page_title="Pro株分析AI Ver.2.5", page_icon="📊", layout="wide")
 
-# 人気銘柄リスト (社名表示用辞書として保持)
+# 人気銘柄辞書
 NAME_MAP = {
-    "7203.T": "トヨタ自動車",
-    "9984.T": "ソフトバンクG",
-    "8306.T": "三菱UFJ",
-    "6920.T": "レーザーテック",
-    "6758.T": "ソニーG",
-    "9983.T": "ファーストリテイリング",
-    "8035.T": "東京エレクトロン",
-    "4502.T": "武田薬品",
-    "9432.T": "NTT",
-    "7974.T": "任天堂",
-    "6861.T": "キーエンス",
-    "6098.T": "リクルート",
-    "4063.T": "信越化学",
-    "6301.T": "コマツ",
-    "8058.T": "三菱商事",
+    "7203.T": "トヨタ自動車", "9984.T": "ソフトバンクG", "8306.T": "三菱UFJ",
+    "6920.T": "レーザーテック", "6758.T": "ソニーG", "9983.T": "ファーストリテイリング",
+    "8035.T": "東京エレクトロン", "4502.T": "武田薬品", "9432.T": "NTT",
+    "7974.T": "任天堂", "6861.T": "キーエンス", "6098.T": "リクルート",
+    "4063.T": "信越化学", "6301.T": "コマツ", "8058.T": "三菱商事",
     "1570.T": "日経レバETF"
 }
 
@@ -61,7 +52,8 @@ def add_indicators(df, params):
     # 3. SMA / BB
     if params.get('use_ma_entry'):
         df['SMA'] = df['Close'].rolling(window=params['ma_n']).mean()
-    if params.get('use_bb_entry'):
+    
+    if params.get('use_bb_entry') or params.get('use_bb_exit'):
         sma_bb = df['Close'].rolling(window=params['bb_n']).mean()
         std = df['Close'].rolling(window=params['bb_n']).std()
         df['BB_Upper'] = sma_bb + (std * params['bb_sigma'])
@@ -113,13 +105,19 @@ def backtest_strategy(df, params, lot_size):
     
     # パラメータ展開
     use_rsi = params['use_rsi_entry']
+    rsi_mode = params.get('rsi_mode', '逆張り') # New
+    
     use_vwap = params['use_vwap_entry']
     use_ma = params['use_ma_entry']
+    
     use_bb = params['use_bb_entry']
+    bb_mode = params.get('bb_mode', '逆張り') # New
+    
     use_macd = params['use_macd_entry']
     use_adx = params['use_adx_filter']
     
     use_rsi_exit = params['use_rsi_exit']
+    use_bb_exit = params['use_bb_exit']
     
     take_profit_pct = params['take_profit_pct'] / 100
     stop_loss_pct = params['stop_loss_pct'] / 100
@@ -132,6 +130,7 @@ def backtest_strategy(df, params, lot_size):
         vwap = df['VWAP'].iloc[i] if 'VWAP' in df.columns else np.nan
         sma = df['SMA'].iloc[i] if 'SMA' in df.columns else np.nan
         bb_lower = df['BB_Lower'].iloc[i] if 'BB_Lower' in df.columns else np.nan
+        bb_upper = df['BB_Upper'].iloc[i] if 'BB_Upper' in df.columns else np.nan
         
         macd = df['MACD'].iloc[i] if 'MACD' in df.columns else np.nan
         macd_sig = df['MACD_Signal'].iloc[i] if 'MACD_Signal' in df.columns else np.nan
@@ -145,20 +144,36 @@ def backtest_strategy(df, params, lot_size):
         # --- 買い判定 (AND条件) ---
         buy_condition = True
         
-        if use_rsi and not (rsi <= params['rsi_buy_thresh']): buy_condition = False
+        # 1. RSI (順張り/逆張り 切り替え)
+        if use_rsi:
+            if rsi_mode == '逆張り': # 以下なら買い
+                if not (rsi <= params['rsi_buy_thresh']): buy_condition = False
+            else: # 順張り: 以上なら買い
+                if not (rsi >= params['rsi_buy_thresh']): buy_condition = False
         
+        # 2. VWAP
         if use_vwap:
             lower_limit = vwap * (1 - params['vwap_low_pct'] / 100)
             upper_limit = vwap * (1 + params['vwap_high_pct'] / 100)
             if not (lower_limit <= price <= upper_limit): buy_condition = False
         
+        # 3. MACD
         if use_macd and not (macd > macd_sig): buy_condition = False
             
+        # 4. ADX
         if use_adx and not (adx >= params['adx_thresh']): buy_condition = False
 
+        # 5. MA
         if use_ma and not (price > sma): buy_condition = False
-        if use_bb and not (price <= bb_lower): buy_condition = False
+
+        # 6. BB (順張り/逆張り 切り替え)
+        if use_bb:
+            if bb_mode == '逆張り': # -2σ割れで買い
+                if not (price <= bb_lower): buy_condition = False
+            else: # 順張り: +2σ越えで買い (ブレイク)
+                if not (price >= bb_upper): buy_condition = False
         
+        # 条件未選択なら買わない
         if not any([use_rsi, use_vwap, use_ma, use_bb, use_macd]): buy_condition = False
 
         # --- 売り判定 (OR条件) ---
@@ -166,15 +181,20 @@ def backtest_strategy(df, params, lot_size):
         sell_reason = ""
         
         if position == 1:
+            # 1. 損益
             pnl_pct = (price - entry_price) / entry_price
             if pnl_pct >= take_profit_pct:
                 sell_condition = True; sell_reason = "利確"
             elif pnl_pct <= -stop_loss_pct:
                 sell_condition = True; sell_reason = "損切"
             
+            # 2. テクニカル
             if not sell_condition:
                 if use_rsi_exit and rsi >= params['rsi_sell_thresh']:
                     sell_condition = True; sell_reason = f"RSI高({int(rsi)})"
+                
+                if use_bb_exit and price >= bb_upper:
+                    sell_condition = True; sell_reason = "BB+2σ"
 
         if position == 0 and buy_condition:
             position = 1
@@ -209,108 +229,111 @@ def backtest_strategy(df, params, lot_size):
 # ==========================================
 # UI設計
 # ==========================================
-st.title("⚡ Pro株分析AI Ver.2.3")
-st.caption("MACD, ADXを含む高度な複合シグナル分析ツール")
+st.title("⚡ Pro株分析AI Ver.2.5")
+st.caption("順張り・逆張りの両方に対応した高度シグナル分析ツール")
 
-# --- サイドバー設定 ---
+# --- サイドバー ---
 st.sidebar.header("🔍 分析対象の設定")
 
-# リスト選択を廃止し、テキストエリア入力に変更
 st.sidebar.caption("銘柄コードを入力してください (複数可)")
 tickers_input = st.sidebar.text_area(
     "コード入力 (改行 または カンマ区切り)",
-    value="7203.T\n6920.T\n1570.T",
+    value="",
+    placeholder="例:\n7203\n8306\n9984",
     height=100
 )
 
-# 入力されたテキストをリストに変換
 selected_tickers = []
 if tickers_input:
-    # 改行、カンマ、空白で分割してリスト化
-    import re
     raw_tickers = re.split(r'[,\n\s]+', tickers_input)
     for t in raw_tickers:
         t = t.strip()
         if t:
-            # .T がなければつける (数字だけの場合)
-            if t.isdigit():
-                t = t + ".T"
-            elif not t.endswith(".T") and not t.endswith(".t"):
-                # すでに.Tがついているか、米国株などはそのままにする判断も可だが
-                # ここでは簡易的に日本株前提で補完
-                pass
-            
+            if t.isdigit(): t = t + ".T"
             selected_tickers.append(t)
 
-# Yahooリンク
 st.sidebar.markdown("[🔎 銘柄コードを検索する (Yahoo!ファイナンス)](https://finance.yahoo.co.jp/)")
-
 st.sidebar.markdown("---")
 
 # 条件設定
 with st.sidebar.expander("⚙️ 条件設定", expanded=True):
     
-    # === 買い条件エリア ===
+    # === 買い条件 ===
     st.subheader("🟢 買い条件")
     st.caption("※チェックした全条件を満たす時に買います")
     
     # MACD
-    use_macd_entry = st.checkbox("MACD (上昇トレンド)", value=False)
+    use_macd_entry = st.checkbox("MACD (上昇トレンド有無)", value=False)
     
     # ADX
-    use_adx_filter = st.checkbox("ADX (トレンド発生中のみ)", value=False)
+    use_adx_filter = st.checkbox("ADX (トレンド発生度合)", value=False)
     adx_thresh = 25
     if use_adx_filter:
         adx_thresh = st.slider("ADX値 以上", 10, 50, 25)
 
-    # RSI
-    use_rsi_entry = st.checkbox("RSI (売られすぎ)", value=True)
+    # RSI (順張り・逆張り対応)
+    use_rsi_entry = st.checkbox("RSI (買われすぎ/売られすぎ)", value=True)
+    rsi_mode = '逆張り'
     rsi_buy_thresh = 30
     if use_rsi_entry:
-        rsi_buy_thresh = st.slider("RSI値 以下", 10, 50, 30)
+        col_r1, col_r2 = st.columns([1, 1])
+        with col_r1:
+            rsi_mode = st.selectbox("RSI判定", ["逆張り", "順張り"], key="rsi_m")
+        with col_r2:
+            if rsi_mode == '逆張り':
+                rsi_buy_thresh = st.number_input("以下なら買い", value=30, step=1)
+            else:
+                rsi_buy_thresh = st.number_input("以上なら買い", value=50, step=1)
 
     # VWAP
-    use_vwap_entry = st.checkbox("VWAP (価格帯)", value=False)
+    use_vwap_entry = st.checkbox("VWAP (平均取引価格)", value=False)
     vwap_high_pct = 1.0; vwap_low_pct = 3.0
     if use_vwap_entry:
         col_v1, col_v2 = st.columns(2)
         with col_v1: vwap_high_pct = st.number_input("上 (+%)", value=1.0)
         with col_v2: vwap_low_pct = st.number_input("下 (-%)", value=3.0)
             
-    # その他指標
-    use_ma_entry = st.checkbox("移動平均線 (価格 > MA)", value=False)
-    use_bb_entry = st.checkbox("ボリンジャーバンド (-2σ割れ)", value=False)
+    # MA
+    use_ma_entry = st.checkbox("移動平均線 (ゴールデンクロス)", value=False)
+    
+    # BB (順張り・逆張り対応)
+    use_bb_entry = st.checkbox("ボリンジャーバンド (反発/ブレイク)", value=False)
+    bb_mode = '逆張り'
+    if use_bb_entry:
+        bb_mode = st.radio("BB判定", ["逆張り (-2σ割れで買い)", "順張り (+2σブレイクで買い)"], horizontal=False)
 
     st.markdown("---")
     
-    # === 売り条件エリア ===
+    # === 売り条件 ===
     st.subheader("🔴 売り条件")
-    st.caption("※どれか一つでも満たせば売ります")
     
     # 損益
     col_p, col_l = st.columns(2)
     with col_p: take_profit_pct = st.number_input("利確 (%)", value=5.0, step=0.5)
     with col_l: stop_loss_pct = st.number_input("損切 (%)", value=3.0, step=0.5)
         
-    # 指標での売り
-    use_rsi_exit = st.checkbox("RSI (買われすぎ)", value=False)
+    # 指標売り
+    use_rsi_exit = st.checkbox("RSI (買われすぎ度合)", value=False)
     rsi_sell_thresh = 70
     if use_rsi_exit:
         rsi_sell_thresh = st.slider("売りRSI値 以上", 50, 95, 75)
+        
+    use_bb_exit = st.checkbox("ボリンジャーバンド (+2σ越え)", value=False)
 
     st.markdown("---")
     lot_size = st.number_input("1回の株数", value=100)
 
-# パラメータまとめ
+# パラメータ
 params = {
-    'use_rsi_entry': use_rsi_entry, 'rsi_buy_thresh': rsi_buy_thresh,
+    'use_rsi_entry': use_rsi_entry, 'rsi_mode': rsi_mode, 'rsi_buy_thresh': rsi_buy_thresh,
     'use_vwap_entry': use_vwap_entry, 'vwap_high_pct': vwap_high_pct, 'vwap_low_pct': vwap_low_pct,
     'use_ma_entry': use_ma_entry, 'ma_n': 25, 
-    'use_bb_entry': use_bb_entry, 'bb_n': 20, 'bb_sigma': 2.0,
+    'use_bb_entry': use_bb_entry, 'bb_mode': bb_mode, 'bb_n': 20, 'bb_sigma': 2.0,
     'use_macd_entry': use_macd_entry,
     'use_adx_filter': use_adx_filter, 'adx_thresh': adx_thresh,
     'take_profit_pct': take_profit_pct, 'stop_loss_pct': stop_loss_pct,
-    'use_rsi_exit': use_rsi_exit, 'rsi_sell_thresh': rsi_sell_thresh
+    'use_rsi_exit': use_rsi_exit, 'rsi_sell_thresh': rsi_sell_thresh,
+    'use_bb_exit': use_bb_exit
 }
 
 # ==========================================
@@ -327,9 +350,7 @@ if st.button("🚀 分析スタート"):
         st.error("銘柄コードを入力してください")
     else:
         for i, ticker in enumerate(selected_tickers):
-            # 辞書にあれば社名を使う、なければコードそのまま
             name = NAME_MAP.get(ticker, ticker)
-            
             df = get_stock_data(ticker)
             
             if df is not None:
@@ -365,7 +386,6 @@ if st.button("🚀 分析スタート"):
 
         with tab2:
             if results:
-                # 選択肢には社名を表示
                 target_options = df_summary['コード'].tolist()
                 target = st.selectbox("チャートを表示", target_options, format_func=lambda x: f"{NAME_MAP.get(x,x)}")
                 
@@ -382,7 +402,10 @@ if st.button("🚀 分析スタート"):
                     fig.add_trace(go.Scatter(x=df_res.index, y=df_res['Close'], name='株価', line=dict(color='gray')), row=1, col=1)
                     if params['use_vwap_entry']:
                         fig.add_trace(go.Scatter(x=df_res.index, y=df_res['VWAP'], name='VWAP', line=dict(color='orange', dash='dot')), row=1, col=1)
-                    
+                    if params['use_bb_entry'] or params['use_bb_exit']:
+                         fig.add_trace(go.Scatter(x=df_res.index, y=df_res['BB_Upper'], name='+2σ', line=dict(color='green', width=1, dash='dot')), row=1, col=1)
+                         fig.add_trace(go.Scatter(x=df_res.index, y=df_res['BB_Lower'], name='-2σ', line=dict(color='red', width=1, dash='dot')), row=1, col=1)
+
                     buy_pts = df_res[df_res['Buy_Signal'].notna()]
                     sell_pts = df_res[df_res['Sell_Signal'].notna()]
                     fig.add_trace(go.Scatter(x=buy_pts.index, y=buy_pts['Buy_Signal'], mode='markers', name='買い', marker=dict(symbol='triangle-up', size=12, color='red')), row=1, col=1)
@@ -397,6 +420,7 @@ if st.button("🚀 分析スタート"):
                     fig.add_trace(go.Scatter(x=df_res.index, y=df_res['RSI'], name='RSI', line=dict(color='purple')), row=3, col=1)
                     fig.add_trace(go.Scatter(x=df_res.index, y=df_res['ADX'], name='ADX', line=dict(color='green', width=1)), row=3, col=1)
                     fig.add_hline(y=30, line_dash="dash", line_color="red", row=3, col=1)
+                    fig.add_hline(y=70, line_dash="dash", line_color="blue", row=3, col=1)
                     fig.add_hline(y=25, line_dash="dash", line_color="green", row=3, col=1)
                     
                     fig.update_layout(height=800, margin=dict(t=20, b=20, l=10, r=10), showlegend=False)
