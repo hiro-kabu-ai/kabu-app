@@ -7,7 +7,7 @@ from plotly.subplots import make_subplots
 import re
 
 # --- 設定 ---
-st.set_page_config(page_title="Pro株分析AI Ver.2.5", page_icon="📊", layout="wide")
+st.set_page_config(page_title="Pro株分析AI Ver.2.6", page_icon="📊", layout="wide")
 
 # 人気銘柄辞書
 NAME_MAP = {
@@ -105,13 +105,13 @@ def backtest_strategy(df, params, lot_size):
     
     # パラメータ展開
     use_rsi = params['use_rsi_entry']
-    rsi_mode = params.get('rsi_mode', '逆張り') # New
+    rsi_mode = params.get('rsi_mode', '逆張り')
     
     use_vwap = params['use_vwap_entry']
     use_ma = params['use_ma_entry']
     
     use_bb = params['use_bb_entry']
-    bb_mode = params.get('bb_mode', '逆張り') # New
+    bb_mode = params.get('bb_mode', '逆張り')
     
     use_macd = params['use_macd_entry']
     use_adx = params['use_adx_filter']
@@ -146,7 +146,7 @@ def backtest_strategy(df, params, lot_size):
         
         # 1. RSI (順張り/逆張り 切り替え)
         if use_rsi:
-            if rsi_mode == '逆張り': # 以下なら買い
+            if '逆張り' in rsi_mode: # 以下なら買い
                 if not (rsi <= params['rsi_buy_thresh']): buy_condition = False
             else: # 順張り: 以上なら買い
                 if not (rsi >= params['rsi_buy_thresh']): buy_condition = False
@@ -168,9 +168,9 @@ def backtest_strategy(df, params, lot_size):
 
         # 6. BB (順張り/逆張り 切り替え)
         if use_bb:
-            if bb_mode == '逆張り': # -2σ割れで買い
+            if '逆張り' in bb_mode: # -2σ割れで買い
                 if not (price <= bb_lower): buy_condition = False
-            else: # 順張り: +2σ越えで買い (ブレイク)
+            else: # 順張り: +2σ越えで買い
                 if not (price >= bb_upper): buy_condition = False
         
         # 条件未選択なら買わない
@@ -229,7 +229,7 @@ def backtest_strategy(df, params, lot_size):
 # ==========================================
 # UI設計
 # ==========================================
-st.title("⚡ Pro株分析AI Ver.2.5")
+st.title("⚡ Pro株分析AI Ver.2.6")
 st.caption("順張り・逆張りの両方に対応した高度シグナル分析ツール")
 
 # --- サイドバー ---
@@ -271,19 +271,18 @@ with st.sidebar.expander("⚙️ 条件設定", expanded=True):
     if use_adx_filter:
         adx_thresh = st.slider("ADX値 以上", 10, 50, 25)
 
-    # RSI (順張り・逆張り対応)
-    use_rsi_entry = st.checkbox("RSI (買われすぎ/売られすぎ)", value=True)
+    # RSI (ここを修正：ラジオボタンで見やすく)
+    use_rsi_entry = st.checkbox("RSI (売られすぎ度合)", value=True)
     rsi_mode = '逆張り'
     rsi_buy_thresh = 30
     if use_rsi_entry:
-        col_r1, col_r2 = st.columns([1, 1])
-        with col_r1:
-            rsi_mode = st.selectbox("RSI判定", ["逆張り", "順張り"], key="rsi_m")
-        with col_r2:
-            if rsi_mode == '逆張り':
-                rsi_buy_thresh = st.number_input("以下なら買い", value=30, step=1)
-            else:
-                rsi_buy_thresh = st.number_input("以上なら買い", value=50, step=1)
+        # ドロップダウンからラジオボタンに変更し、横並び配置の制限を解除
+        rsi_mode = st.radio("判定モード", ["逆張り (〇〇以下で買い)", "順張り (〇〇以上で買い)"], horizontal=False)
+        
+        if "逆張り" in rsi_mode:
+            rsi_buy_thresh = st.number_input("RSI値 以下なら買い", value=30, step=1)
+        else:
+            rsi_buy_thresh = st.number_input("RSI値 以上なら買い", value=50, step=1)
 
     # VWAP
     use_vwap_entry = st.checkbox("VWAP (平均取引価格)", value=False)
@@ -296,7 +295,7 @@ with st.sidebar.expander("⚙️ 条件設定", expanded=True):
     # MA
     use_ma_entry = st.checkbox("移動平均線 (ゴールデンクロス)", value=False)
     
-    # BB (順張り・逆張り対応)
+    # BB
     use_bb_entry = st.checkbox("ボリンジャーバンド (反発/ブレイク)", value=False)
     bb_mode = '逆張り'
     if use_bb_entry:
