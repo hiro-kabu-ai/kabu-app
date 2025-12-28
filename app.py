@@ -7,7 +7,7 @@ from plotly.subplots import make_subplots
 import re
 
 # --- 設定 ---
-st.set_page_config(page_title="Pro株分析AI Ver.2.6", page_icon="📊", layout="wide")
+st.set_page_config(page_title="Pro株分析AI Ver.2.9", page_icon="📊", layout="wide")
 
 # 人気銘柄辞書
 NAME_MAP = {
@@ -105,17 +105,11 @@ def backtest_strategy(df, params, lot_size):
     
     # パラメータ展開
     use_rsi = params['use_rsi_entry']
-    rsi_mode = params.get('rsi_mode', '逆張り')
-    
     use_vwap = params['use_vwap_entry']
     use_ma = params['use_ma_entry']
-    
     use_bb = params['use_bb_entry']
-    bb_mode = params.get('bb_mode', '逆張り')
-    
     use_macd = params['use_macd_entry']
     use_adx = params['use_adx_filter']
-    
     use_rsi_exit = params['use_rsi_exit']
     use_bb_exit = params['use_bb_exit']
     
@@ -136,52 +130,68 @@ def backtest_strategy(df, params, lot_size):
         macd_sig = df['MACD_Signal'].iloc[i] if 'MACD_Signal' in df.columns else np.nan
         adx = df['ADX'].iloc[i] if 'ADX' in df.columns else np.nan
 
+        # 計算不可時はスキップ
         if pd.isna(rsi) or (use_macd and pd.isna(macd)) or (use_adx and pd.isna(adx)):
             buy_signals.append(np.nan)
             sell_signals.append(np.nan)
             continue
 
-        # --- 買い判定 (AND条件) ---
+        # =========================
+        # 🟢 買い判定 (AND条件)
+        # =========================
         buy_condition = True
         
-        # 1. RSI (順張り/逆張り 切り替え)
+        # 1. RSI (以上/以下)
         if use_rsi:
-            if '逆張り' in rsi_mode: # 以下なら買い
-                if not (rsi <= params['rsi_buy_thresh']): buy_condition = False
-            else: # 順張り: 以上なら買い
-                if not (rsi >= params['rsi_buy_thresh']): buy_condition = False
+            op = params['rsi_op']
+            thresh = params['rsi_buy_thresh']
+            if op == '以下':
+                if not (rsi <= thresh): buy_condition = False
+            else: # 以上
+                if not (rsi >= thresh): buy_condition = False
         
-        # 2. VWAP
+        # 2. VWAP (範囲)
         if use_vwap:
-            lower_limit = vwap * (1 - params['vwap_low_pct'] / 100)
-            upper_limit = vwap * (1 + params['vwap_high_pct'] / 100)
-            if not (lower_limit <= price <= upper_limit): buy_condition = False
+            # VWAP * (1 + 下限/100)  ～  VWAP * (1 + 上限/100)
+            low_limit = vwap * (1 + params['vwap_min_pct'] / 100)
+            high_limit = vwap * (1 + params['vwap_max_pct'] / 100)
+            
+            if not (low_limit <= price <= high_limit):
+                buy_condition = False
         
         # 3. MACD
         if use_macd and not (macd > macd_sig): buy_condition = False
             
-        # 4. ADX
-        if use_adx and not (adx >= params['adx_thresh']): buy_condition = False
+        # 4. ADX (以上/以下)
+        if use_adx:
+            op = params['adx_op']
+            thresh = params['adx_thresh']
+            if op == '以上':
+                if not (adx >= thresh): buy_condition = False
+            else: # 以下
+                if not (adx <= thresh): buy_condition = False
 
         # 5. MA
         if use_ma and not (price > sma): buy_condition = False
 
-        # 6. BB (順張り/逆張り 切り替え)
+        # 6. BB
         if use_bb:
-            if '逆張り' in bb_mode: # -2σ割れで買い
+            op = params['bb_op']
+            if op == '-2σ以下':
                 if not (price <= bb_lower): buy_condition = False
-            else: # 順張り: +2σ越えで買い
+            else: # +2σ以上
                 if not (price >= bb_upper): buy_condition = False
         
-        # 条件未選択なら買わない
         if not any([use_rsi, use_vwap, use_ma, use_bb, use_macd]): buy_condition = False
 
-        # --- 売り判定 (OR条件) ---
+        # =========================
+        # 🔴 売り判定 (OR条件)
+        # =========================
         sell_condition = False
         sell_reason = ""
         
         if position == 1:
-            # 1. 損益
+            # 1. 損益 (利確 OR 損切)
             pnl_pct = (price - entry_price) / entry_price
             if pnl_pct >= take_profit_pct:
                 sell_condition = True; sell_reason = "利確"
@@ -196,6 +206,7 @@ def backtest_strategy(df, params, lot_size):
                 if use_bb_exit and price >= bb_upper:
                     sell_condition = True; sell_reason = "BB+2σ"
 
+        # 注文処理
         if position == 0 and buy_condition:
             position = 1
             entry_price = price
@@ -229,8 +240,8 @@ def backtest_strategy(df, params, lot_size):
 # ==========================================
 # UI設計
 # ==========================================
-st.title("⚡ Pro株分析AI Ver.2.6")
-st.caption("順張り・逆張りの両方に対応した高度シグナル分析ツール")
+st.title("⚡ Pro株分析AI Ver.2.9")
+st.caption("自由度の高いパラメータ設定でバックテストを行います")
 
 # --- サイドバー ---
 st.sidebar.header("🔍 分析対象の設定")
@@ -260,59 +271,65 @@ with st.sidebar.expander("⚙️ 条件設定", expanded=True):
     
     # === 買い条件 ===
     st.subheader("🟢 買い条件")
-    st.caption("※チェックした全条件を満たす時に買います")
+    st.caption("※チェックした【全条件】を満たす時に買います (AND条件)")
     
     # MACD
     use_macd_entry = st.checkbox("MACD (上昇トレンド有無)", value=False)
     
     # ADX
-    use_adx_filter = st.checkbox("ADX (トレンド発生度合)", value=False)
+    use_adx_filter = st.checkbox("ADX (トレンド強度)", value=False)
+    adx_op = '以上'
     adx_thresh = 25
     if use_adx_filter:
-        adx_thresh = st.slider("ADX値 以上", 10, 50, 25)
+        col_a1, col_a2 = st.columns([1, 1])
+        with col_a1:
+            adx_op = st.selectbox("条件", ["以上", "以下"], key="adx_op")
+        with col_a2:
+            adx_thresh = st.number_input("ADX値", value=25, step=1)
 
-    # RSI (ここを修正：ラジオボタンで見やすく)
-    use_rsi_entry = st.checkbox("RSI (売られすぎ度合)", value=True)
-    rsi_mode = '逆張り'
+    # RSI
+    use_rsi_entry = st.checkbox("RSI", value=True)
+    rsi_op = '以下'
     rsi_buy_thresh = 30
     if use_rsi_entry:
-        # ドロップダウンからラジオボタンに変更し、横並び配置の制限を解除
-        rsi_mode = st.radio("判定モード", ["逆張り (〇〇以下で買い)", "順張り (〇〇以上で買い)"], horizontal=False)
-        
-        if "逆張り" in rsi_mode:
-            rsi_buy_thresh = st.number_input("RSI値 以下なら買い", value=30, step=1)
-        else:
-            rsi_buy_thresh = st.number_input("RSI値 以上なら買い", value=50, step=1)
+        col_r1, col_r2 = st.columns([1, 1])
+        with col_r1:
+            rsi_op = st.selectbox("条件", ["以下", "以上"], key="rsi_op")
+        with col_r2:
+            rsi_buy_thresh = st.number_input("RSI値", value=30, step=1)
 
     # VWAP
-    use_vwap_entry = st.checkbox("VWAP (平均取引価格)", value=False)
-    vwap_high_pct = 1.0; vwap_low_pct = 3.0
+    use_vwap_entry = st.checkbox("VWAP (乖離率)", value=False)
+    vwap_min_pct = -100.0
+    vwap_max_pct = 100.0
     if use_vwap_entry:
+        st.caption("👇 VWAPからの乖離率 (%) がこの範囲なら買い")
         col_v1, col_v2 = st.columns(2)
-        with col_v1: vwap_high_pct = st.number_input("上 (+%)", value=1.0)
-        with col_v2: vwap_low_pct = st.number_input("下 (-%)", value=3.0)
+        with col_v1: vwap_min_pct = st.number_input("x% 以上 ～", value=-3.0, step=0.5)
+        with col_v2: vwap_max_pct = st.number_input("～ y% 以下", value=1.0, step=0.5)
             
     # MA
     use_ma_entry = st.checkbox("移動平均線 (ゴールデンクロス)", value=False)
     
     # BB
-    use_bb_entry = st.checkbox("ボリンジャーバンド (反発/ブレイク)", value=False)
-    bb_mode = '逆張り'
+    use_bb_entry = st.checkbox("ボリンジャーバンド", value=False)
+    bb_op = '-2σ以下'
     if use_bb_entry:
-        bb_mode = st.radio("BB判定", ["逆張り (-2σ割れで買い)", "順張り (+2σブレイクで買い)"], horizontal=False)
+        bb_op = st.selectbox("BB条件", ["-2σ以下", "+2σ以上"])
 
     st.markdown("---")
     
     # === 売り条件 ===
     st.subheader("🔴 売り条件")
+    st.caption("※以下の条件の【どれか1つでも】満たしたら売ります (OR条件)")
     
     # 損益
     col_p, col_l = st.columns(2)
-    with col_p: take_profit_pct = st.number_input("利確 (%)", value=5.0, step=0.5)
-    with col_l: stop_loss_pct = st.number_input("損切 (%)", value=3.0, step=0.5)
+    with col_p: take_profit_pct = st.number_input("利確 (+%)", value=5.0, step=0.5)
+    with col_l: stop_loss_pct = st.number_input("損切 (-%)", value=3.0, step=0.5)
         
     # 指標売り
-    use_rsi_exit = st.checkbox("RSI (買われすぎ度合)", value=False)
+    use_rsi_exit = st.checkbox("RSI (買われすぎ)", value=False)
     rsi_sell_thresh = 70
     if use_rsi_exit:
         rsi_sell_thresh = st.slider("売りRSI値 以上", 50, 95, 75)
@@ -324,12 +341,12 @@ with st.sidebar.expander("⚙️ 条件設定", expanded=True):
 
 # パラメータ
 params = {
-    'use_rsi_entry': use_rsi_entry, 'rsi_mode': rsi_mode, 'rsi_buy_thresh': rsi_buy_thresh,
-    'use_vwap_entry': use_vwap_entry, 'vwap_high_pct': vwap_high_pct, 'vwap_low_pct': vwap_low_pct,
+    'use_rsi_entry': use_rsi_entry, 'rsi_op': rsi_op, 'rsi_buy_thresh': rsi_buy_thresh,
+    'use_vwap_entry': use_vwap_entry, 'vwap_min_pct': vwap_min_pct, 'vwap_max_pct': vwap_max_pct,
     'use_ma_entry': use_ma_entry, 'ma_n': 25, 
-    'use_bb_entry': use_bb_entry, 'bb_mode': bb_mode, 'bb_n': 20, 'bb_sigma': 2.0,
+    'use_bb_entry': use_bb_entry, 'bb_op': bb_op, 'bb_n': 20, 'bb_sigma': 2.0,
     'use_macd_entry': use_macd_entry,
-    'use_adx_filter': use_adx_filter, 'adx_thresh': adx_thresh,
+    'use_adx_filter': use_adx_filter, 'adx_op': adx_op, 'adx_thresh': adx_thresh,
     'take_profit_pct': take_profit_pct, 'stop_loss_pct': stop_loss_pct,
     'use_rsi_exit': use_rsi_exit, 'rsi_sell_thresh': rsi_sell_thresh,
     'use_bb_exit': use_bb_exit
