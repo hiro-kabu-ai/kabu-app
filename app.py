@@ -7,7 +7,7 @@ from plotly.subplots import make_subplots
 import re
 
 # --- 設定 ---
-st.set_page_config(page_title="Pro株分析AI Ver.2.11", page_icon="📊", layout="wide")
+st.set_page_config(page_title="Pro株分析AI Ver.2.12", page_icon="📊", layout="wide")
 
 # 人気銘柄辞書
 NAME_MAP = {
@@ -110,7 +110,9 @@ def backtest_strategy(df, params, lot_size):
     use_bb = params['use_bb_entry']
     use_macd = params['use_macd_entry']
     use_adx = params['use_adx_filter']
-    use_rsi_exit = params['use_rsi_exit']
+    
+    use_rsi_exit_high = params['use_rsi_exit_high'] # New
+    use_rsi_exit_low = params['use_rsi_exit_low']   # New
     use_bb_exit = params['use_bb_exit']
     
     take_profit_pct = params['take_profit_pct'] / 100
@@ -140,7 +142,7 @@ def backtest_strategy(df, params, lot_size):
         # =========================
         buy_condition = True
         
-        # 1. RSI (相場の過熱度合)
+        # 1. RSI (エントリー)
         if use_rsi:
             op = params['rsi_buy_op']
             thresh = params['rsi_buy_thresh']
@@ -197,19 +199,19 @@ def backtest_strategy(df, params, lot_size):
             
             # 2. テクニカル決済
             if not sell_condition:
-                # RSI売り (相場の過熱度合)
-                if use_rsi_exit:
-                    op = params['rsi_sell_op']
-                    thresh = params['rsi_sell_thresh']
-                    if op == '以上': 
-                        if rsi >= thresh:
-                            sell_condition = True; sell_reason = f"RSI高({int(rsi)})"
-                    else: 
-                        if rsi <= thresh:
-                            sell_condition = True; sell_reason = f"RSI低({int(rsi)})"
+                
+                # RSI売り (高値圏)
+                if use_rsi_exit_high:
+                    if rsi >= params['rsi_sell_high_thresh']:
+                        sell_condition = True; sell_reason = f"RSI高({int(rsi)})"
+                
+                # RSI売り (安値圏/トレンド崩れ)
+                if not sell_condition and use_rsi_exit_low:
+                    if rsi <= params['rsi_sell_low_thresh']:
+                        sell_condition = True; sell_reason = f"RSI低({int(rsi)})"
                 
                 # BB売り
-                if use_bb_exit and price >= bb_upper:
+                if not sell_condition and use_bb_exit and price >= bb_upper:
                     sell_condition = True; sell_reason = "BB+2σ"
 
         # 注文処理
@@ -246,7 +248,7 @@ def backtest_strategy(df, params, lot_size):
 # ==========================================
 # UI設計
 # ==========================================
-st.title("⚡ Pro株分析AI Ver.2.11")
+st.title("⚡ Pro株分析AI Ver.2.12")
 st.caption("自由度の高いパラメータ設定でバックテストを行います")
 
 # --- サイドバー ---
@@ -291,7 +293,7 @@ with st.sidebar.expander("⚙️ 条件設定", expanded=True):
         with col_a1: adx_op = st.selectbox("条件", ["以上", "以下"], key="adx_op_buy")
         with col_a2: adx_thresh = st.number_input("ADX値", value=25, step=1)
 
-    # RSI (買い) - keyを追加して重複回避
+    # RSI (買い)
     use_rsi_entry = st.checkbox("RSI (相場の過熱度合)", value=True, key="rsi_buy_check")
     rsi_buy_op = '以下'
     rsi_buy_thresh = 30
@@ -332,16 +334,17 @@ with st.sidebar.expander("⚙️ 条件設定", expanded=True):
     with col_p: take_profit_pct = st.number_input("利確 (+%)", value=5.0, step=0.5)
     with col_l: stop_loss_pct = st.number_input("損切 (-%)", value=3.0, step=0.5)
         
-    # RSI (売り) - keyを追加して重複回避
-    use_rsi_exit = st.checkbox("RSI (相場の過熱度合)", value=False, key="rsi_sell_check")
-    rsi_sell_op = '以上'
-    rsi_sell_thresh = 70
-    if use_rsi_exit:
-        col_rs1, col_rs2 = st.columns([1, 1])
-        with col_rs1:
-            rsi_sell_op = st.selectbox("条件", ["以上", "以下"], key="rsi_sell_op")
-        with col_rs2:
-            rsi_sell_thresh = st.number_input("RSI値", value=70, step=1)
+    # RSI (売り) - 高値・安値両方対応
+    st.markdown("##### RSI (相場の過熱度合)")
+    use_rsi_exit_high = st.checkbox("〇〇以上で売り (利確など)", value=False)
+    rsi_sell_high_thresh = 70
+    if use_rsi_exit_high:
+        rsi_sell_high_thresh = st.number_input("RSI値 以上", value=70, step=1, key="rsi_out_high")
+        
+    use_rsi_exit_low = st.checkbox("〇〇以下で売り (手仕舞いなど)", value=False)
+    rsi_sell_low_thresh = 40
+    if use_rsi_exit_low:
+        rsi_sell_low_thresh = st.number_input("RSI値 以下", value=40, step=1, key="rsi_out_low")
         
     # BB (売り)
     use_bb_exit = st.checkbox("ボリンジャーバンド (+2σ越え)", value=False)
@@ -358,7 +361,8 @@ params = {
     'use_macd_entry': use_macd_entry,
     'use_adx_filter': use_adx_filter, 'adx_op': adx_op, 'adx_thresh': adx_thresh,
     'take_profit_pct': take_profit_pct, 'stop_loss_pct': stop_loss_pct,
-    'use_rsi_exit': use_rsi_exit, 'rsi_sell_op': rsi_sell_op, 'rsi_sell_thresh': rsi_sell_thresh,
+    'use_rsi_exit_high': use_rsi_exit_high, 'rsi_sell_high_thresh': rsi_sell_high_thresh,
+    'use_rsi_exit_low': use_rsi_exit_low, 'rsi_sell_low_thresh': rsi_sell_low_thresh,
     'use_bb_exit': use_bb_exit
 }
 
