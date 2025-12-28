@@ -6,10 +6,10 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 # --- 設定 ---
-st.set_page_config(page_title="Pro株分析AI Ver.2.2", page_icon="📊", layout="wide")
+st.set_page_config(page_title="Pro株分析AI Ver.2.3", page_icon="📊", layout="wide")
 
-# 人気銘柄リスト
-POPULAR_STOCKS = {
+# 人気銘柄リスト (社名表示用辞書として保持)
+NAME_MAP = {
     "7203.T": "トヨタ自動車",
     "9984.T": "ソフトバンクG",
     "8306.T": "三菱UFJ",
@@ -209,35 +209,45 @@ def backtest_strategy(df, params, lot_size):
 # ==========================================
 # UI設計
 # ==========================================
-st.title("⚡ Pro株分析AI Ver.2.2")
+st.title("⚡ Pro株分析AI Ver.2.3")
 st.caption("MACD, ADXを含む高度な複合シグナル分析ツール")
 
 # --- サイドバー設定 ---
 st.sidebar.header("🔍 分析対象の設定")
 
-# 1. 銘柄複数選択
-default_tickers = ["7203.T", "6920.T", "1570.T"]
-selected_tickers = st.sidebar.multiselect(
-    "リストから選択",
-    options=list(POPULAR_STOCKS.keys()),
-    default=default_tickers,
-    format_func=lambda x: f"{POPULAR_STOCKS[x]} ({x})"
+# リスト選択を廃止し、テキストエリア入力に変更
+st.sidebar.caption("銘柄コードを入力してください (複数可)")
+tickers_input = st.sidebar.text_area(
+    "コード入力 (改行 または カンマ区切り)",
+    value="7203.T\n6920.T\n1570.T",
+    height=100
 )
 
-st.sidebar.caption("👇 リストにない銘柄はこちら")
-custom_input = st.sidebar.text_input("コード入力 (例: 9101)", key="custom_ticker")
-if custom_input:
-    ticker_to_add = custom_input if ".T" in custom_input else custom_input + ".T"
-    if ticker_to_add not in selected_tickers:
-        selected_tickers.append(ticker_to_add)
-    st.sidebar.success(f"{ticker_to_add} を追加しました")
+# 入力されたテキストをリストに変換
+selected_tickers = []
+if tickers_input:
+    # 改行、カンマ、空白で分割してリスト化
+    import re
+    raw_tickers = re.split(r'[,\n\s]+', tickers_input)
+    for t in raw_tickers:
+        t = t.strip()
+        if t:
+            # .T がなければつける (数字だけの場合)
+            if t.isdigit():
+                t = t + ".T"
+            elif not t.endswith(".T") and not t.endswith(".t"):
+                # すでに.Tがついているか、米国株などはそのままにする判断も可だが
+                # ここでは簡易的に日本株前提で補完
+                pass
+            
+            selected_tickers.append(t)
 
 # Yahooリンク
 st.sidebar.markdown("[🔎 銘柄コードを検索する (Yahoo!ファイナンス)](https://finance.yahoo.co.jp/)")
 
 st.sidebar.markdown("---")
 
-# 2. 条件設定
+# 条件設定
 with st.sidebar.expander("⚙️ 条件設定", expanded=True):
     
     # === 買い条件エリア ===
@@ -313,82 +323,92 @@ if st.button("🚀 分析スタート"):
     detail_data = {}
     progress_bar = st.progress(0)
     
-    for i, ticker in enumerate(selected_tickers):
-        name = POPULAR_STOCKS.get(ticker, ticker)
-        df = get_stock_data(ticker)
+    if not selected_tickers:
+        st.error("銘柄コードを入力してください")
+    else:
+        for i, ticker in enumerate(selected_tickers):
+            # 辞書にあれば社名を使う、なければコードそのまま
+            name = NAME_MAP.get(ticker, ticker)
+            
+            df = get_stock_data(ticker)
+            
+            if df is not None:
+                df_calc = add_indicators(df, params)
+                df_res, log = backtest_strategy(df_calc, params, lot_size)
+                
+                if not log.empty:
+                    total_profit = log['損益'].sum()
+                    wins = len(log[log['損益'] > 0])
+                    win_rate = (wins / (len(log)/2)) * 100
+                    results.append({
+                        "銘柄名": name, "コード": ticker,
+                        "利益": total_profit, "勝率": f"{win_rate:.1f}%", "回数": len(log)//2
+                    })
+                else:
+                    results.append({"銘柄名": name, "コード": ticker, "利益": 0, "勝率": "-", "回数": 0})
+                
+                detail_data[ticker] = (df_res, log, name)
+            
+            progress_bar.progress((i + 1) / len(selected_tickers))
         
-        if df is not None:
-            df_calc = add_indicators(df, params)
-            df_res, log = backtest_strategy(df_calc, params, lot_size)
-            
-            if not log.empty:
-                total_profit = log['損益'].sum()
-                wins = len(log[log['損益'] > 0])
-                win_rate = (wins / (len(log)/2)) * 100
-                results.append({
-                    "銘柄名": name, "コード": ticker,
-                    "利益": total_profit, "勝率": f"{win_rate:.1f}%", "回数": len(log)//2
-                })
-            else:
-                results.append({"銘柄名": name, "コード": ticker, "利益": 0, "勝率": "-", "回数": 0})
-            
-            detail_data[ticker] = (df_res, log, name)
+        # 結果表示
+        st.markdown("### 📊 分析結果ランキング")
         
-        progress_bar.progress((i + 1) / len(selected_tickers))
-    
-    # 結果表示
-    st.markdown("### 📊 分析結果ランキング")
-    
-    tab1, tab2, tab3 = st.tabs(["🏆 収益一覧", "📈 詳細チャート", "📝 取引ログ"])
-    
-    with tab1:
-        if results:
-            df_summary = pd.DataFrame(results).sort_values("利益", ascending=False)
-            st.dataframe(df_summary.style.format({"利益": "{:,.0f}円"}), use_container_width=True, hide_index=True)
-        else:
-            st.error("データなし")
-
-    with tab2:
-        target = st.selectbox("チャートを表示", df_summary['コード'].tolist(), format_func=lambda x: f"{POPULAR_STOCKS.get(x,x)}")
-        if target in detail_data:
-            df_res, _, name = detail_data[target]
-            
-            fig = make_subplots(
-                rows=3, cols=1, shared_xaxes=True, 
-                row_heights=[0.5, 0.25, 0.25], vertical_spacing=0.05,
-                subplot_titles=("株価 & 売買サイン", "MACD", "RSI & ADX")
-            )
-            
-            # 1. 株価
-            fig.add_trace(go.Scatter(x=df_res.index, y=df_res['Close'], name='株価', line=dict(color='gray')), row=1, col=1)
-            if params['use_vwap_entry']:
-                fig.add_trace(go.Scatter(x=df_res.index, y=df_res['VWAP'], name='VWAP', line=dict(color='orange', dash='dot')), row=1, col=1)
-            
-            buy_pts = df_res[df_res['Buy_Signal'].notna()]
-            sell_pts = df_res[df_res['Sell_Signal'].notna()]
-            fig.add_trace(go.Scatter(x=buy_pts.index, y=buy_pts['Buy_Signal'], mode='markers', name='買い', marker=dict(symbol='triangle-up', size=12, color='red')), row=1, col=1)
-            fig.add_trace(go.Scatter(x=sell_pts.index, y=sell_pts['Sell_Signal'], mode='markers', name='売り', marker=dict(symbol='triangle-down', size=12, color='blue')), row=1, col=1)
-            
-            # 2. MACD
-            fig.add_trace(go.Scatter(x=df_res.index, y=df_res['MACD'], name='MACD', line=dict(color='cyan')), row=2, col=1)
-            fig.add_trace(go.Scatter(x=df_res.index, y=df_res['MACD_Signal'], name='Signal', line=dict(color='orange')), row=2, col=1)
-            fig.add_bar(x=df_res.index, y=df_res['MACD_Hist'], name='Hist', marker_color='gray', row=2, col=1)
-            
-            # 3. RSI & ADX
-            fig.add_trace(go.Scatter(x=df_res.index, y=df_res['RSI'], name='RSI', line=dict(color='purple')), row=3, col=1)
-            fig.add_trace(go.Scatter(x=df_res.index, y=df_res['ADX'], name='ADX', line=dict(color='green', width=1)), row=3, col=1)
-            fig.add_hline(y=30, line_dash="dash", line_color="red", row=3, col=1)
-            fig.add_hline(y=25, line_dash="dash", line_color="green", row=3, col=1)
-            
-            fig.update_layout(height=800, margin=dict(t=20, b=20, l=10, r=10), showlegend=False)
-            st.plotly_chart(fig, use_container_width=True)
-
-    with tab3:
-        target_log = st.selectbox("ログを表示", df_summary['コード'].tolist(), key="log_sel", format_func=lambda x: f"{POPULAR_STOCKS.get(x,x)}")
-        if target_log in detail_data:
-            _, log, _ = detail_data[target_log]
-            if not log.empty:
-                log['日付'] = log['日付'].dt.strftime('%Y-%m-%d')
-                st.dataframe(log[['日付', '売買', '単価', '損益', '理由']], use_container_width=True)
+        tab1, tab2, tab3 = st.tabs(["🏆 収益一覧", "📈 詳細チャート", "📝 取引ログ"])
+        
+        with tab1:
+            if results:
+                df_summary = pd.DataFrame(results).sort_values("利益", ascending=False)
+                st.dataframe(df_summary.style.format({"利益": "{:,.0f}円"}), use_container_width=True, hide_index=True)
             else:
-                st.info("取引なし")
+                st.error("データなし（コードが正しいか確認してください）")
+
+        with tab2:
+            if results:
+                # 選択肢には社名を表示
+                target_options = df_summary['コード'].tolist()
+                target = st.selectbox("チャートを表示", target_options, format_func=lambda x: f"{NAME_MAP.get(x,x)}")
+                
+                if target in detail_data:
+                    df_res, _, name = detail_data[target]
+                    
+                    fig = make_subplots(
+                        rows=3, cols=1, shared_xaxes=True, 
+                        row_heights=[0.5, 0.25, 0.25], vertical_spacing=0.05,
+                        subplot_titles=("株価 & 売買サイン", "MACD", "RSI & ADX")
+                    )
+                    
+                    # 1. 株価
+                    fig.add_trace(go.Scatter(x=df_res.index, y=df_res['Close'], name='株価', line=dict(color='gray')), row=1, col=1)
+                    if params['use_vwap_entry']:
+                        fig.add_trace(go.Scatter(x=df_res.index, y=df_res['VWAP'], name='VWAP', line=dict(color='orange', dash='dot')), row=1, col=1)
+                    
+                    buy_pts = df_res[df_res['Buy_Signal'].notna()]
+                    sell_pts = df_res[df_res['Sell_Signal'].notna()]
+                    fig.add_trace(go.Scatter(x=buy_pts.index, y=buy_pts['Buy_Signal'], mode='markers', name='買い', marker=dict(symbol='triangle-up', size=12, color='red')), row=1, col=1)
+                    fig.add_trace(go.Scatter(x=sell_pts.index, y=sell_pts['Sell_Signal'], mode='markers', name='売り', marker=dict(symbol='triangle-down', size=12, color='blue')), row=1, col=1)
+                    
+                    # 2. MACD
+                    fig.add_trace(go.Scatter(x=df_res.index, y=df_res['MACD'], name='MACD', line=dict(color='cyan')), row=2, col=1)
+                    fig.add_trace(go.Scatter(x=df_res.index, y=df_res['MACD_Signal'], name='Signal', line=dict(color='orange')), row=2, col=1)
+                    fig.add_bar(x=df_res.index, y=df_res['MACD_Hist'], name='Hist', marker_color='gray', row=2, col=1)
+                    
+                    # 3. RSI & ADX
+                    fig.add_trace(go.Scatter(x=df_res.index, y=df_res['RSI'], name='RSI', line=dict(color='purple')), row=3, col=1)
+                    fig.add_trace(go.Scatter(x=df_res.index, y=df_res['ADX'], name='ADX', line=dict(color='green', width=1)), row=3, col=1)
+                    fig.add_hline(y=30, line_dash="dash", line_color="red", row=3, col=1)
+                    fig.add_hline(y=25, line_dash="dash", line_color="green", row=3, col=1)
+                    
+                    fig.update_layout(height=800, margin=dict(t=20, b=20, l=10, r=10), showlegend=False)
+                    st.plotly_chart(fig, use_container_width=True)
+
+        with tab3:
+            if results:
+                target_log = st.selectbox("ログを表示", df_summary['コード'].tolist(), key="log_sel", format_func=lambda x: f"{NAME_MAP.get(x,x)}")
+                if target_log in detail_data:
+                    _, log, _ = detail_data[target_log]
+                    if not log.empty:
+                        log['日付'] = log['日付'].dt.strftime('%Y-%m-%d')
+                        st.dataframe(log[['日付', '売買', '単価', '損益', '理由']], use_container_width=True)
+                    else:
+                        st.info("取引なし")
